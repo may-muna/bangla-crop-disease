@@ -23,15 +23,15 @@ MODEL_DIR.mkdir(exist_ok=True)
 # Google Drive downloadable files
 # ----------------------------
 files = {
-    "bert_lstm_final_model.pth":       "1zWtlLUMA9UM1ggatNbzPgsTMB1FR5MNf",
+    "bert_lstm_final_model.pth":        "1zWtlLUMA9UM1ggatNbzPgsTMB1FR5MNf",
     "bert_lstm_final_label_encoder.pkl":"1suK3wLB6iV57pM8lQ5PyJFpN6D8ddP1d",
-    "bert_lstm_final_remedy.pkl":      "1xwMe9VTdePuw_qRkEZoooWevxk0XcNtc"
+    "bert_lstm_final_remedy.pkl":       "1xwMe9VTdePuw_qRkEZoooWevxk0XcNtc"
 }
 
 # ----------------------------
-# Download tokenizer folder (fixed)
+# Download tokenizer folder (robust)
 # ----------------------------
-if not TOKENIZER_DIR.exists():
+if not TOKENIZER_DIR.exists() or not (TOKENIZER_DIR / "vocab.txt").exists():
     st.info("Downloading tokenizer folder from Google Drive...")
 
     gdown.download_folder(
@@ -43,14 +43,17 @@ if not TOKENIZER_DIR.exists():
 
     st.info("Fixing tokenizer folder structure...")
 
-    # Move nested files up if needed
-    inner = TOKENIZER_DIR / "bert_lstm_final_tokenizer"
-    if inner.exists():
-        for item in inner.iterdir():
+    # If nested folder exists, move all files up
+    nested_folders = list(TOKENIZER_DIR.glob("*/"))
+    for folder in nested_folders:
+        for item in folder.iterdir():
             shutil.move(str(item), str(TOKENIZER_DIR))
-        shutil.rmtree(inner)
+        shutil.rmtree(folder)
 
-    st.success("Tokenizer downloaded and ready!")
+    if not (TOKENIZER_DIR / "vocab.txt").exists():
+        st.error("Tokenizer download failed! vocab.txt not found.")
+    else:
+        st.success("Tokenizer downloaded and ready!")
 
 st.write("Tokenizer files:", list(TOKENIZER_DIR.glob("*")))
 
@@ -83,7 +86,6 @@ class BERT_LSTM_Model(nn.Module):
     def __init__(self, hidden_dim=128, num_classes=len(label_encoder.classes_), dropout=0.3):
         super().__init__()
         BERT_DIR = MODEL_DIR / "bert-base-multilingual-cased"
-
         self.bert = BertModel.from_pretrained(str(BERT_DIR), local_files_only=True)
 
         self.lstm = nn.LSTM(
