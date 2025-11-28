@@ -8,7 +8,6 @@ import joblib
 import tempfile
 import speech_recognition as sr
 import gdown
-import zipfile
 import shutil
 import os
 
@@ -21,48 +20,51 @@ TOKENIZER_DIR = MODEL_DIR / "bert_lstm_final_tokenizer"
 MODEL_DIR.mkdir(exist_ok=True)
 
 # ----------------------------
-# Google Drive downloadable links
+# Google Drive downloadable files
 # ----------------------------
 files = {
-    # Convert folder → ZIP download
-    "bert_lstm_final_tokenizer.zip":
-        "https://drive.google.com/uc?export=download&id=1XPgrRdWfO3B50EaWAcR9zIKHNlCbnA6-",
-
-    "bert_lstm_final_remedy.pkl":      "1xwMe9VTdePuw_qRkEZoooWevxk0XcNtc",
     "bert_lstm_final_model.pth":       "1zWtlLUMA9UM1ggatNbzPgsTMB1FR5MNf",
     "bert_lstm_final_label_encoder.pkl":"1suK3wLB6iV57pM8lQ5PyJFpN6D8ddP1d",
+    "bert_lstm_final_remedy.pkl":      "1xwMe9VTdePuw_qRkEZoooWevxk0XcNtc"
 }
 
 # ----------------------------
-# Download files + extract tokenizer
+# Download tokenizer folder (fixed)
 # ----------------------------
-for fname, link in files.items():
-    dest = MODEL_DIR / fname
+if not TOKENIZER_DIR.exists():
+    st.info("Downloading tokenizer folder from Google Drive...")
 
-    if not dest.exists():
-        st.info(f"Downloading {fname} ...")
+    gdown.download_folder(
+        url="https://drive.google.com/drive/folders/1XPgrRdWfO3B50EaWAcR9zIKHNlCbnA6-",
+        output=str(TOKENIZER_DIR),
+        quiet=False,
+        use_cookies=False
+    )
 
-        # gdown supports full URL, so use it directly
-        gdown.download(link, str(dest), quiet=False)
+    st.info("Fixing tokenizer folder structure...")
 
-        if fname.endswith(".zip"):
-            st.info("Extracting tokenizer...")
+    # Move nested files up if needed
+    inner = TOKENIZER_DIR / "bert_lstm_final_tokenizer"
+    if inner.exists():
+        for item in inner.iterdir():
+            shutil.move(str(item), str(TOKENIZER_DIR))
+        shutil.rmtree(inner)
 
-            if TOKENIZER_DIR.exists():
-                shutil.rmtree(TOKENIZER_DIR)
+    st.success("Tokenizer downloaded and ready!")
 
-            TOKENIZER_DIR.mkdir(exist_ok=True)
-
-            with zipfile.ZipFile(dest, 'r') as z:
-                z.extractall(TOKENIZER_DIR)
-
-            st.success("Tokenizer extracted successfully!")
-
-# Debug on Streamlit Cloud
 st.write("Tokenizer files:", list(TOKENIZER_DIR.glob("*")))
 
 # ----------------------------
-# Load tokenizer & labels
+# Download model/label/remedy files
+# ----------------------------
+for fname, file_id in files.items():
+    dest = MODEL_DIR / fname
+    if not dest.exists():
+        st.info(f"Downloading {fname} ...")
+        gdown.download(f"https://drive.google.com/uc?id={file_id}", str(dest), quiet=False)
+
+# ----------------------------
+# Load Tokenizer & Labels
 # ----------------------------
 tokenizer = AutoTokenizer.from_pretrained(
     str(TOKENIZER_DIR),
@@ -112,7 +114,7 @@ model.eval()
 MAX_LEN = 128
 
 # ----------------------------
-# Prediction
+# Prediction function
 # ----------------------------
 def predict_text(text):
     inputs = tokenizer(
