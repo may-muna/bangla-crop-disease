@@ -3,10 +3,9 @@ torch
 transformers
 joblib
 gdown
-soundfile
 SpeechRecognition
+soundfile
 numpy
-pandas
 protobuf==3.20.3
 requests
 scipy
