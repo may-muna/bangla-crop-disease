@@ -9,6 +9,8 @@ import tempfile
 import speech_recognition as sr
 import gdown
 import zipfile
+import shutil
+import os
 
 # ----------------------------
 # Paths
@@ -19,35 +21,54 @@ TOKENIZER_DIR = MODEL_DIR / "bert_lstm_final_tokenizer"
 MODEL_DIR.mkdir(exist_ok=True)
 
 # ----------------------------
-# Google Drive files
+# Google Drive downloadable links
 # ----------------------------
 files = {
-    "bert_lstm_final_tokenizer.zip": "1Ub6VHt4f3V4FyLIrYn6I_e1ayu3yerTn",
+    # Convert folder → ZIP download
+    "bert_lstm_final_tokenizer.zip":
+        "https://drive.google.com/uc?export=download&id=1XPgrRdWfO3B50EaWAcR9zIKHNlCbnA6-",
+
     "bert_lstm_final_remedy.pkl":      "1xwMe9VTdePuw_qRkEZoooWevxk0XcNtc",
     "bert_lstm_final_model.pth":       "1zWtlLUMA9UM1ggatNbzPgsTMB1FR5MNf",
     "bert_lstm_final_label_encoder.pkl":"1suK3wLB6iV57pM8lQ5PyJFpN6D8ddP1d",
-    "bert_lstm_checkpoint.pth":        "1R1KxCUfznN0taWVsTrwRyu8tVrXbqYmH"
 }
 
 # ----------------------------
-# Download files if missing
+# Download files + extract tokenizer
 # ----------------------------
-for fname, file_id in files.items():
-    dest_path = MODEL_DIR / fname
-    if not dest_path.exists():
-        url = f"https://drive.google.com/uc?id={file_id}"
+for fname, link in files.items():
+    dest = MODEL_DIR / fname
+
+    if not dest.exists():
         st.info(f"Downloading {fname} ...")
-        gdown.download(url, str(dest_path), quiet=False)
+
+        # gdown supports full URL, so use it directly
+        gdown.download(link, str(dest), quiet=False)
 
         if fname.endswith(".zip"):
-            with zipfile.ZipFile(dest_path, 'r') as z:
+            st.info("Extracting tokenizer...")
+
+            if TOKENIZER_DIR.exists():
+                shutil.rmtree(TOKENIZER_DIR)
+
+            TOKENIZER_DIR.mkdir(exist_ok=True)
+
+            with zipfile.ZipFile(dest, 'r') as z:
                 z.extractall(TOKENIZER_DIR)
-            st.success("Tokenizer extracted.")
+
+            st.success("Tokenizer extracted successfully!")
+
+# Debug on Streamlit Cloud
+st.write("Tokenizer files:", list(TOKENIZER_DIR.glob("*")))
 
 # ----------------------------
-# Load tokenizer, label encoder, remedy
+# Load tokenizer & labels
 # ----------------------------
-tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_DIR)
+tokenizer = AutoTokenizer.from_pretrained(
+    str(TOKENIZER_DIR),
+    local_files_only=True
+)
+
 label_encoder = joblib.load(MODEL_DIR / "bert_lstm_final_label_encoder.pkl")
 remedy_dict = joblib.load(MODEL_DIR / "bert_lstm_final_remedy.pkl")
 
@@ -60,6 +81,7 @@ class BERT_LSTM_Model(nn.Module):
     def __init__(self, hidden_dim=128, num_classes=len(label_encoder.classes_), dropout=0.3):
         super().__init__()
         BERT_DIR = MODEL_DIR / "bert-base-multilingual-cased"
+
         self.bert = BertModel.from_pretrained(str(BERT_DIR), local_files_only=True)
 
         self.lstm = nn.LSTM(
@@ -69,18 +91,18 @@ class BERT_LSTM_Model(nn.Module):
             batch_first=True,
             bidirectional=True
         )
+
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_dim * 2, num_classes)
 
     def forward(self, input_ids, attention_mask):
-        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        lstm_out, _ = self.lstm(outputs.last_hidden_state)
-        lstm_out = self.dropout(lstm_out)
-        cls_token = lstm_out[:, 0, :]
+        bert_out = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        lstm_out, _ = self.lstm(bert_out.last_hidden_state)
+        cls_token = self.dropout(lstm_out[:, 0, :])
         return self.classifier(cls_token)
 
 # ----------------------------
-# Load model
+# Load trained model
 # ----------------------------
 model = BERT_LSTM_Model().to(device)
 state = torch.load(MODEL_DIR / "bert_lstm_final_model.pth", map_location=device)
@@ -90,7 +112,7 @@ model.eval()
 MAX_LEN = 128
 
 # ----------------------------
-# Prediction Function
+# Prediction
 # ----------------------------
 def predict_text(text):
     inputs = tokenizer(
@@ -116,7 +138,7 @@ def predict_text(text):
     return disease, remedy
 
 # ----------------------------
-# Audio to Text
+# Audio → Bangla text
 # ----------------------------
 def transcribe_bangla(audio_file):
     if audio_file is None:
@@ -124,14 +146,14 @@ def transcribe_bangla(audio_file):
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp.write(audio_file.read())
-        tmp_path = tmp.name
+        filename = tmp.name
 
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(tmp_path) as source:
-        audio = recognizer.record(source)
+    recog = sr.Recognizer()
+    with sr.AudioFile(filename) as source:
+        audio = recog.record(source)
 
     try:
-        text = recognizer.recognize_google(audio, language="bn-BD")
+        text = recog.recognize_google(audio, language="bn-BD")
     except:
         text = "⚠️ অডিও থেকে কিছু বুঝতে পারিনি।"
 
@@ -145,28 +167,26 @@ st.title("🌾 ফসলের রোগ নির্ণয় সিস্ট�
 method = st.radio("ইনপুট পদ্ধতি নির্বাচন করুন:", ["✍ টেক্সট", "🎤 অডিও আপলোড"])
 
 if method == "✍ টেক্সট":
-    text = st.text_area("রোগের লক্ষণ লিখুন (বাংলা):")
+    text = st.text_area("রোগের লক্ষণ লিখুন:")
 
     if st.button("রোগ নির্ণয় করুন"):
-        if text.strip() == "":
+        if not text.strip():
             st.warning("⚠️ টেক্সট লিখুন।")
         else:
             disease, remedy = predict_text(text)
-            st.success("সফলভাবে রোগ শনাক্ত হয়েছে!")
             st.markdown(f"### 🦠 রোগ: **{disease}**")
             st.markdown(f"### 💊 প্রতিকার:\n{remedy}")
 
 else:
-    audio = st.file_uploader("অডিও ফাইল আপলোড করুন:", type=["wav", "mp3"])
+    audio = st.file_uploader("অডিও আপলোড করুন", type=["wav", "mp3"])
 
     if st.button("রোগ নির্ণয় করুন"):
         if audio is None:
-            st.warning("⚠️ অডিও ফাইল আপলোড করুন।")
+            st.warning("⚠️ অডিও আপলোড করুন।")
         else:
             text = transcribe_bangla(audio)
-            st.markdown(f"### 📝 শনাক্ত টেক্সট: {text}")
+            st.markdown(f"### 📝 শনাক্ত টেক্সট:\n{text}")
 
             disease, remedy = predict_text(text)
-            st.success("সফলভাবে রোগ শনাক্ত হয়েছে!")
             st.markdown(f"### 🦠 রোগ: **{disease}**")
             st.markdown(f"### 💊 প্রতিকার:\n{remedy}")
