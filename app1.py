@@ -8,6 +8,7 @@ import joblib
 import tempfile
 import speech_recognition as sr
 import gdown
+import zipfile
 import shutil
 import os
 
@@ -20,7 +21,39 @@ TOKENIZER_DIR = MODEL_DIR / "bert_lstm_final_tokenizer"
 MODEL_DIR.mkdir(exist_ok=True)
 
 # ----------------------------
-# Google Drive downloadable files
+# Tokenizer ZIP
+# ----------------------------
+TOKENIZER_ZIP_URL = "https://drive.google.com/uc?id=1Ub6VHt4f3V4FyLIrYn6I_e1ayu3yerTn"
+TOKENIZER_ZIP_PATH = MODEL_DIR / "bert_lstm_final_tokenizer.zip"
+
+if not TOKENIZER_DIR.exists() or not (TOKENIZER_DIR / "vocab.txt").exists():
+    st.info("Downloading tokenizer ZIP...")
+    gdown.download(TOKENIZER_ZIP_URL, str(TOKENIZER_ZIP_PATH), quiet=False)
+
+    st.info("Extracting tokenizer...")
+    if TOKENIZER_DIR.exists():
+        shutil.rmtree(TOKENIZER_DIR)
+    TOKENIZER_DIR.mkdir(exist_ok=True)
+
+    with zipfile.ZipFile(TOKENIZER_ZIP_PATH, 'r') as z:
+        z.extractall(TOKENIZER_DIR)
+
+    # Fix nested folders
+    nested = list(TOKENIZER_DIR.glob("*/"))
+    for folder in nested:
+        for item in folder.iterdir():
+            shutil.move(str(item), str(TOKENIZER_DIR))
+        shutil.rmtree(folder)
+
+    if (TOKENIZER_DIR / "vocab.txt").exists():
+        st.success("Tokenizer ready!")
+    else:
+        st.error("Tokenizer extraction failed! vocab.txt not found.")
+
+st.write("Tokenizer files:", list(TOKENIZER_DIR.glob("*")))
+
+# ----------------------------
+# Model / Label / Remedy download
 # ----------------------------
 files = {
     "bert_lstm_final_model.pth":        "1zWtlLUMA9UM1ggatNbzPgsTMB1FR5MNf",
@@ -28,38 +61,6 @@ files = {
     "bert_lstm_final_remedy.pkl":       "1xwMe9VTdePuw_qRkEZoooWevxk0XcNtc"
 }
 
-# ----------------------------
-# Download tokenizer folder (robust)
-# ----------------------------
-if not TOKENIZER_DIR.exists() or not (TOKENIZER_DIR / "vocab.txt").exists():
-    st.info("Downloading tokenizer folder from Google Drive...")
-
-    gdown.download_folder(
-        url="https://drive.google.com/drive/folders/1XPgrRdWfO3B50EaWAcR9zIKHNlCbnA6-",
-        output=str(TOKENIZER_DIR),
-        quiet=False,
-        use_cookies=False
-    )
-
-    st.info("Fixing tokenizer folder structure...")
-
-    # If nested folder exists, move all files up
-    nested_folders = list(TOKENIZER_DIR.glob("*/"))
-    for folder in nested_folders:
-        for item in folder.iterdir():
-            shutil.move(str(item), str(TOKENIZER_DIR))
-        shutil.rmtree(folder)
-
-    if not (TOKENIZER_DIR / "vocab.txt").exists():
-        st.error("Tokenizer download failed! vocab.txt not found.")
-    else:
-        st.success("Tokenizer downloaded and ready!")
-
-st.write("Tokenizer files:", list(TOKENIZER_DIR.glob("*")))
-
-# ----------------------------
-# Download model/label/remedy files
-# ----------------------------
 for fname, file_id in files.items():
     dest = MODEL_DIR / fname
     if not dest.exists():
@@ -67,8 +68,10 @@ for fname, file_id in files.items():
         gdown.download(f"https://drive.google.com/uc?id={file_id}", str(dest), quiet=False)
 
 # ----------------------------
-# Load Tokenizer & Labels
+# Load tokenizer & label encoder
 # ----------------------------
+from sklearn.preprocessing import LabelEncoder  # Important to import before loading pickle
+
 tokenizer = AutoTokenizer.from_pretrained(
     str(TOKENIZER_DIR),
     local_files_only=True
@@ -80,7 +83,7 @@ remedy_dict = joblib.load(MODEL_DIR / "bert_lstm_final_remedy.pkl")
 device = torch.device("cpu")
 
 # ----------------------------
-# BERT+LSTM Model
+# BERT+LSTM model
 # ----------------------------
 class BERT_LSTM_Model(nn.Module):
     def __init__(self, hidden_dim=128, num_classes=len(label_encoder.classes_), dropout=0.3):
@@ -95,7 +98,6 @@ class BERT_LSTM_Model(nn.Module):
             batch_first=True,
             bidirectional=True
         )
-
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_dim * 2, num_classes)
 
@@ -106,7 +108,7 @@ class BERT_LSTM_Model(nn.Module):
         return self.classifier(cls_token)
 
 # ----------------------------
-# Load trained model
+# Load model
 # ----------------------------
 model = BERT_LSTM_Model().to(device)
 state = torch.load(MODEL_DIR / "bert_lstm_final_model.pth", map_location=device)
@@ -142,7 +144,7 @@ def predict_text(text):
     return disease, remedy
 
 # ----------------------------
-# Audio → Bangla text
+# Audio transcription
 # ----------------------------
 def transcribe_bangla(audio_file):
     if audio_file is None:
