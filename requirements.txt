@@ -1,11 +1,9 @@
 streamlit
 torch
 transformers
-joblib
+scikit-learn
 gdown
-SpeechRecognition
-soundfile
+pandas
 numpy
-protobuf==3.20.3
-requests
-scipy
+speechrecognition
+pydub
