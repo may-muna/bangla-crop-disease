@@ -14,7 +14,7 @@ import queue
 import av
 import numpy as np
 import soundfile as sf
-import ffmpeg
+from pydub import AudioSegment
 from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
 
 # ----------------------------
@@ -124,15 +124,12 @@ def transcribe_audio(path):
     return recog.recognize_google(audio, language="bn-BD")
 
 def convert_to_wav(input_path):
-    """Convert any audio format to 16kHz mono WAV using ffmpeg-python"""
+    """Convert any audio format to 16kHz mono WAV using pydub"""
+    ext = input_path.split(".")[-1].lower()
+    audio = AudioSegment.from_file(input_path, format=ext)
+    audio = audio.set_channels(1).set_frame_rate(16000)
     output_path = input_path.rsplit(".", 1)[0] + "_16k.wav"
-    (
-        ffmpeg
-        .input(input_path)
-        .output(output_path, ar=16000, ac=1, format='wav')
-        .overwrite_output()
-        .run(quiet=True)
-    )
+    audio.export(output_path, format="wav")
     return output_path
 
 # ----------------------------
@@ -195,7 +192,6 @@ elif method == "🎙 মাইক্রোফোন":
             while not ctx.audio_processor.frames.empty():
                 frames.append(ctx.audio_processor.frames.get())
 
-            # Convert frames to WAV buffer
             audio_data = np.concatenate([f.to_ndarray() for f in frames], axis=0)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
                 sf.write(f.name, audio_data, 16000, format="WAV")
