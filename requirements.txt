@@ -5,8 +5,9 @@ joblib
 numpy
 scikit-learn
 speechrecognition
-ffmpeg-python
 streamlit-webrtc
 av
 gdown
 soundfile
+pydub
+ffmpeg-static
