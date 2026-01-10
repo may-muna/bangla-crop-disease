@@ -6,16 +6,14 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModel
 import joblib
 import tempfile
-import speech_recognition as sr
 import gdown
 import zipfile
 import os
+from pydub import AudioSegment
+import speech_recognition as sr
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
 import queue
 import av
-import numpy as np
-import soundfile as sf
-from pydub import AudioSegment
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
 
 # ----------------------------
 # Google Drive FILE IDs
@@ -37,7 +35,7 @@ device = torch.device("cpu")
 MAX_LEN = 128
 
 # ----------------------------
-# Download files from Google Drive
+# Download from Google Drive
 # ----------------------------
 def download_if_not_exists(file_id, out_path):
     if not out_path.exists():
@@ -59,7 +57,7 @@ def prepare_files():
 prepare_files()
 
 # ----------------------------
-# Load model and tokenizer
+# Load model
 # ----------------------------
 @st.cache_resource
 def load_tokenizer_and_model():
@@ -115,30 +113,32 @@ def predict_text(text):
     return disease, remedy
 
 # ----------------------------
-# Audio transcription
+# Convert any audio to WAV
+# ----------------------------
+def convert_to_wav(file_path):
+    audio = AudioSegment.from_file(file_path)  # handles mp3, wav, m4a
+    wav_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    audio.export(wav_file.name, format="wav")
+    return wav_file.name
+
+# ----------------------------
+# Transcribe audio
 # ----------------------------
 def transcribe_audio(path):
     recog = sr.Recognizer()
     with sr.AudioFile(path) as source:
         audio = recog.record(source)
-    return recog.recognize_google(audio, language="bn-BD")
-
-def convert_to_wav(input_path):
-    """Convert any audio format to 16kHz mono WAV using pydub"""
-    ext = input_path.split(".")[-1].lower()
-    audio = AudioSegment.from_file(input_path, format=ext)
-    audio = audio.set_channels(1).set_frame_rate(16000)
-    output_path = input_path.rsplit(".", 1)[0] + "_16k.wav"
-    audio.export(output_path, format="wav")
-    return output_path
+    try:
+        return recog.recognize_google(audio, language="bn-BD")
+    except:
+        return "⚠️ অডিও থেকে কিছু বুঝতে পারিনি।"
 
 # ----------------------------
-# WebRTC microphone
+# WebRTC Microphone
 # ----------------------------
 class AudioProcessor(AudioProcessorBase):
     def __init__(self):
         self.frames = queue.Queue()
-
     def recv_audio(self, frame: av.AudioFrame):
         self.frames.put(frame)
         return frame
@@ -153,7 +153,7 @@ method = st.radio(
     ["✍ টেক্সট", "🎤 অডিও আপলোড", "🎙 মাইক্রোফোন"]
 )
 
-# ---- TEXT INPUT ----
+# ---- TEXT ----
 if method == "✍ টেক্সট":
     text = st.text_area("রোগের লক্ষণ লিখুন:")
     if st.button("রোগ নির্ণয় করুন"):
@@ -163,14 +163,10 @@ if method == "✍ টেক্সট":
 
 # ---- AUDIO UPLOAD ----
 elif method == "🎤 অডিও আপলোড":
-    audio_file = st.file_uploader("অডিও আপলোড করুন", type=["wav","mp3","m4a","ogg","flac","webm"])
+    audio_file = st.file_uploader("অডিও আপলোড করুন", type=["wav","mp3","m4a"])
     if st.button("রোগ নির্ণয় করুন") and audio_file:
-        suffix = audio_file.name.split(".")[-1]
-        with tempfile.NamedTemporaryFile(delete=False, suffix="."+suffix) as f:
-            f.write(audio_file.read())
-            wav_path = convert_to_wav(f.name)
-            text = transcribe_audio(wav_path)
-
+        wav_path = convert_to_wav(audio_file)
+        text = transcribe_audio(wav_path)
         st.markdown(f"### 📝 শনাক্ত টেক্সট:\n{text}")
         disease, remedy = predict_text(text)
         st.markdown(f"### 🦠 রোগ: **{disease}**")
@@ -192,11 +188,8 @@ elif method == "🎙 মাইক্রোফোন":
             while not ctx.audio_processor.frames.empty():
                 frames.append(ctx.audio_processor.frames.get())
 
-            audio_data = np.concatenate([f.to_ndarray() for f in frames], axis=0)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-                sf.write(f.name, audio_data, 16000, format="WAV")
-                wav_path = f.name
-
+            pcm = b"".join([f.to_ndarray().tobytes() for f in frames])
+            wav_path = convert_to_wav(io.BytesIO(pcm))
             text = transcribe_audio(wav_path)
             st.markdown(f"### 📝 শনাক্ত টেক্সট:\n{text}")
             disease, remedy = predict_text(text)
