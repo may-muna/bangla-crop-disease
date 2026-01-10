@@ -1,9 +1,10 @@
 streamlit
 torch
 transformers
-scikit-learn
+joblib
 gdown
-pandas
+sounddevice
 numpy
-speechrecognition
-pydub
+wavio
+SpeechRecognition
+ffmpeg-python
