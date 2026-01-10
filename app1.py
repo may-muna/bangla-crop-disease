@@ -113,13 +113,27 @@ def predict_text(text):
     return disease, remedy
 
 # ----------------------------
-# Audio upload transcription
+# Audio upload / microphone transcription
 # ----------------------------
 def transcribe_audio(path):
     recog = sr.Recognizer()
     with sr.AudioFile(path) as source:
         audio = recog.record(source)
     return recog.recognize_google(audio, language="bn-BD")
+
+# Convert any audio to 16kHz mono WAV
+def convert_to_wav(input_path):
+    output_path = input_path.rsplit(".", 1)[0] + "_16k.wav"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+        "-ac", "1",
+        "-ar", "16000",
+        output_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return output_path
 
 # ----------------------------
 # Browser microphone (WebRTC)
@@ -152,11 +166,13 @@ if method == "✍ টেক্সট":
 
 # ---- AUDIO UPLOAD ----
 elif method == "🎤 অডিও আপলোড":
-    audio_file = st.file_uploader("অডিও আপলোড করুন", type=["wav"])
+    audio_file = st.file_uploader("অডিও আপলোড করুন", type=["wav","mp3","m4a","ogg","flac","webm"])
     if st.button("রোগ নির্ণয় করুন") and audio_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        suffix = audio_file.name.split(".")[-1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix="."+suffix) as f:
             f.write(audio_file.read())
-            text = transcribe_audio(f.name)
+            wav_path = convert_to_wav(f.name)
+            text = transcribe_audio(wav_path)
 
         st.markdown(f"### 📝 শনাক্ত টেক্সট:\n{text}")
         disease, remedy = predict_text(text)
@@ -166,7 +182,6 @@ elif method == "🎤 অডিও আপলোড":
 # ---- MICROPHONE ----
 elif method == "🎙 মাইক্রোফোন":
     st.info("🎙 ব্রাউজার মাইক্রোফোন ব্যবহার করুন")
-
     ctx = webrtc_streamer(
         key="mic",
         audio_processor_factory=AudioProcessor,
@@ -175,15 +190,21 @@ elif method == "🎙 মাইক্রোফোন":
 
     if st.button("রোগ নির্ণয় করুন"):
         if ctx.audio_processor and not ctx.audio_processor.frames.empty():
+            # combine all frames into a proper WAV
             frames = []
             while not ctx.audio_processor.frames.empty():
                 frames.append(ctx.audio_processor.frames.get())
 
-            pcm = b"".join([f.to_ndarray().tobytes() for f in frames])
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-                f.write(pcm)
-                text = transcribe_audio(f.name)
+                # convert frames to WAV using av.AudioFrame
+                import soundfile as sf
+                # stack all frames into numpy array
+                import numpy as np
+                audio_data = np.concatenate([f.to_ndarray() for f in frames], axis=0)
+                sf.write(f.name, audio_data, 16000, format="WAV")
+                wav_path = f.name
 
+            text = transcribe_audio(wav_path)
             st.markdown(f"### 📝 শনাক্ত টেক্সট:\n{text}")
             disease, remedy = predict_text(text)
             st.markdown(f"### 🦠 রোগ: **{disease}**")
