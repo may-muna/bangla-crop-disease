@@ -9,5 +9,4 @@ ffmpeg-python
 streamlit-webrtc
 av
 gdown
-ffmpeg-python
-
+soundfile
