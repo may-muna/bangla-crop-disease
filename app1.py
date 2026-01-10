@@ -7,12 +7,21 @@ from transformers import AutoTokenizer, AutoModel
 import joblib
 import tempfile
 import subprocess
-import sounddevice as sd
-import numpy as np
-import wavio
 import speech_recognition as sr
 import gdown
 import zipfile
+import os
+import queue
+import av
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
+
+# ----------------------------
+# Google Drive FILE IDs
+# ----------------------------
+MODEL_PTH_ID = "1FodXFDpHPpIJWp2KKTks93E7hx5ID91U"
+LABEL_ENCODER_ID = "1wU-u07LKw_oJVucfYzkJ8koNLUpNLkKD"
+REMEDY_ID = "1NElCnlCJyZPRNEZ9LnvZGEFjX5_ZvLJO"
+TOKENIZER_ZIP_ID = "1ngSnmJijllH-Y5SmmP6--7D-eWERqwhf"
 
 # ----------------------------
 # Paths
@@ -22,185 +31,109 @@ MODEL_DIR = BASE / "model"
 TOKENIZER_DIR = MODEL_DIR / "bert_lstm_final_tokenizer"
 MODEL_DIR.mkdir(exist_ok=True)
 
-# ----------------------------
-# GOOGLE DRIVE FILE IDS
-# ----------------------------
-MODEL_PTH_ID = "1FodXFDpHPpIJWp2KKTks93E7hx5ID91U"
-LABEL_ENCODER_ID = "1wU-u07LKw_oJVucfYzkJ8koNLUpNLkKD"
-REMEDY_ID = "1NElCnlCJyZPRNEZ9LnvZGEFjX5_ZvLJO"
-TOKENIZER_ZIP_ID = "1ngSnmJijllH-Y5SmmP6--7D-eWERqwhf"
-
-# ----------------------------
-# Download helper
-# ----------------------------
-def download_from_drive(file_id, output_path):
-    if not output_path.exists():
-        url = f"https://drive.google.com/uc?id={file_id}"
-        gdown.download(url, str(output_path), quiet=False)
-
-# ----------------------------
-# Download model files
-# ----------------------------
-download_from_drive(
-    MODEL_PTH_ID,
-    MODEL_DIR / "bert_lstm_final_model.pth"
-)
-
-download_from_drive(
-    LABEL_ENCODER_ID,
-    MODEL_DIR / "bert_lstm_final_label_encoder.pkl"
-)
-
-download_from_drive(
-    REMEDY_ID,
-    MODEL_DIR / "bert_lstm_final_remedy.pkl"
-)
-
-tokenizer_zip = MODEL_DIR / "bert_lstm_final_tokenizer.zip"
-if not TOKENIZER_DIR.exists():
-    download_from_drive(TOKENIZER_ZIP_ID, tokenizer_zip)
-    with zipfile.ZipFile(tokenizer_zip, "r") as zip_ref:
-        zip_ref.extractall(MODEL_DIR)
-
-# ----------------------------
-# Load tokenizer + model
-# ----------------------------
 device = torch.device("cpu")
 MAX_LEN = 128
 
+# ----------------------------
+# Download from Google Drive
+# ----------------------------
+def download_if_not_exists(file_id, out_path):
+    if not out_path.exists():
+        url = f"https://drive.google.com/uc?id={file_id}"
+        gdown.download(url, str(out_path), quiet=False)
+
+@st.cache_resource
+def prepare_files():
+    download_if_not_exists(MODEL_PTH_ID, MODEL_DIR / "bert_lstm_final_model.pth")
+    download_if_not_exists(LABEL_ENCODER_ID, MODEL_DIR / "bert_lstm_final_label_encoder.pkl")
+    download_if_not_exists(REMEDY_ID, MODEL_DIR / "bert_lstm_final_remedy.pkl")
+
+    zip_path = MODEL_DIR / "tokenizer.zip"
+    if not TOKENIZER_DIR.exists():
+        gdown.download(f"https://drive.google.com/uc?id={TOKENIZER_ZIP_ID}", str(zip_path), quiet=False)
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(MODEL_DIR)
+
+prepare_files()
+
+# ----------------------------
+# Load model
+# ----------------------------
 @st.cache_resource
 def load_tokenizer_and_model():
-    tokenizer = AutoTokenizer.from_pretrained(
-        TOKENIZER_DIR,
-        local_files_only=True
-    )
-
-    label_encoder = joblib.load(
-        MODEL_DIR / "bert_lstm_final_label_encoder.pkl"
-    )
-
-    remedy_dict = joblib.load(
-        MODEL_DIR / "bert_lstm_final_remedy.pkl"
-    )
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_DIR)
+    label_encoder = joblib.load(MODEL_DIR / "bert_lstm_final_label_encoder.pkl")
+    remedy_dict = joblib.load(MODEL_DIR / "bert_lstm_final_remedy.pkl")
 
     class BERT_LSTM_Model(nn.Module):
         def __init__(self, hidden_dim=128, dropout=0.3):
             super().__init__()
-            self.bert = AutoModel.from_pretrained(
-                "bert-base-multilingual-cased"
-            )
+            self.bert = AutoModel.from_pretrained("bert-base-multilingual-cased")
             self.lstm = nn.LSTM(
-                input_size=self.bert.config.hidden_size,
-                hidden_size=hidden_dim,
-                num_layers=1,
+                self.bert.config.hidden_size,
+                hidden_dim,
                 batch_first=True,
                 bidirectional=True
             )
             self.dropout = nn.Dropout(dropout)
-            self.classifier = nn.Linear(
-                hidden_dim * 2,
-                len(label_encoder.classes_)
-            )
+            self.fc = nn.Linear(hidden_dim * 2, len(label_encoder.classes_))
 
         def forward(self, input_ids, attention_mask):
-            bert_out = self.bert(
-                input_ids=input_ids,
-                attention_mask=attention_mask
-            )
+            bert_out = self.bert(input_ids=input_ids, attention_mask=attention_mask)
             lstm_out, _ = self.lstm(bert_out.last_hidden_state)
-            cls_token = self.dropout(lstm_out[:, 0, :])
-            return self.classifier(cls_token)
+            x = self.dropout(lstm_out[:, 0, :])
+            return self.fc(x)
 
     model = BERT_LSTM_Model().to(device)
-    state_dict = torch.load(
-        MODEL_DIR / "bert_lstm_final_model.pth",
-        map_location=device
-    )
-    model.load_state_dict(state_dict)
+    model.load_state_dict(torch.load(MODEL_DIR / "bert_lstm_final_model.pth", map_location=device))
     model.eval()
 
     return tokenizer, model, label_encoder, remedy_dict
 
-
 tokenizer, model, label_encoder, remedy_dict = load_tokenizer_and_model()
 
 # ----------------------------
-# Prediction function
+# Prediction
 # ----------------------------
 def predict_text(text):
     inputs = tokenizer(
         text,
         return_tensors="pt",
-        padding="max_length",
         truncation=True,
+        padding="max_length",
         max_length=MAX_LEN
     )
-
-    if "token_type_ids" in inputs:
-        inputs.pop("token_type_ids")
-
-    inputs = {k: v.to(device) for k, v in inputs.items()}
+    inputs = {k: v.to(device) for k, v in inputs.items() if k != "token_type_ids"}
 
     with torch.no_grad():
-        outputs = model(**inputs)
-        pred = torch.argmax(outputs, dim=1).item()
+        pred = torch.argmax(model(**inputs), dim=1).item()
 
     disease = label_encoder.inverse_transform([pred])[0]
-    remedy = remedy_dict.get(
-        disease,
-        "⚠️ কোনো প্রতিকার পাওয়া যায়নি।"
-    )
+    remedy = remedy_dict.get(disease, "⚠️ কোনো প্রতিকার পাওয়া যায়নি।")
     return disease, remedy
 
 # ----------------------------
-# Transcribe uploaded audio
+# Audio upload transcription
 # ----------------------------
-def transcribe_bangla(audio_file):
-    suffix = ".wav" if audio_file.type == "audio/wav" else ".mp3"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(audio_file.read())
-        input_audio_path = tmp.name
-
-    wav_path = input_audio_path.replace(suffix, ".wav")
-
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", input_audio_path,
-            "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000",
-            wav_path
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-
+def transcribe_audio(path):
     recog = sr.Recognizer()
-    try:
-        with sr.AudioFile(wav_path) as source:
-            audio = recog.record(source)
-        text = recog.recognize_google(audio, language="bn-BD")
-    except:
-        text = "⚠️ অডিও থেকে কিছু বুঝতে পারিনি।"
-
-    return text
+    with sr.AudioFile(path) as source:
+        audio = recog.record(source)
+    return recog.recognize_google(audio, language="bn-BD")
 
 # ----------------------------
-# Record audio (LOCAL ONLY)
+# Browser microphone (WebRTC)
 # ----------------------------
-def record_audio(duration=5, fs=16000):
-    st.info("🔊 এখন কথা বলুন...")
-    audio = sd.rec(
-        int(duration * fs),
-        samplerate=fs,
-        channels=1,
-        dtype="int16"
-    )
-    sd.wait()
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    wavio.write(tmp.name, audio, fs, sampwidth=2)
-    return tmp.name
+class AudioProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.frames = queue.Queue()
+
+    def recv_audio(self, frame: av.AudioFrame):
+        self.frames.put(frame)
+        return frame
 
 # ----------------------------
-# Streamlit UI
+# UI
 # ----------------------------
 st.title("🌾 ফসলের রোগ নির্ণয় সিস্টেম (বাংলা)")
 
@@ -209,44 +142,49 @@ method = st.radio(
     ["✍ টেক্সট", "🎤 অডিও আপলোড", "🎙 মাইক্রোফোন"]
 )
 
-# Text
+# ---- TEXT ----
 if method == "✍ টেক্সট":
     text = st.text_area("রোগের লক্ষণ লিখুন:")
     if st.button("রোগ নির্ণয় করুন"):
-        if text.strip():
-            disease, remedy = predict_text(text)
-            st.markdown(f"### 🦠 রোগ: **{disease}**")
-            st.markdown(f"### 💊 প্রতিকার:\n{remedy}")
-        else:
-            st.warning("⚠️ টেক্সট লিখুন।")
+        disease, remedy = predict_text(text)
+        st.markdown(f"### 🦠 রোগ: **{disease}**")
+        st.markdown(f"### 💊 প্রতিকার:\n{remedy}")
 
-# Audio upload
+# ---- AUDIO UPLOAD ----
 elif method == "🎤 অডিও আপলোড":
-    audio_file = st.file_uploader(
-        "অডিও আপলোড করুন",
-        type=["wav", "mp3"]
-    )
+    audio_file = st.file_uploader("অডিও আপলোড করুন", type=["wav"])
     if st.button("রোগ নির্ণয় করুন") and audio_file:
-        text = transcribe_bangla(audio_file)
-        st.markdown(f"### 📝 শনাক্ত টেক্সট:\n{text}")
-        if "⚠️" not in text:
-            disease, remedy = predict_text(text)
-            st.markdown(f"### 🦠 রোগ: **{disease}**")
-            st.markdown(f"### 💊 প্রতিকার:\n{remedy}")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+            f.write(audio_file.read())
+            text = transcribe_audio(f.name)
 
-# Microphone
+        st.markdown(f"### 📝 শনাক্ত টেক্সট:\n{text}")
+        disease, remedy = predict_text(text)
+        st.markdown(f"### 🦠 রোগ: **{disease}**")
+        st.markdown(f"### 💊 প্রতিকার:\n{remedy}")
+
+# ---- MICROPHONE ----
 elif method == "🎙 মাইক্রোফোন":
-    st.warning("⚠️ Streamlit Cloud এ মাইক্রোফোন কাজ নাও করতে পারে")
+    st.info("🎙 ব্রাউজার মাইক্রোফোন ব্যবহার করুন")
+
+    ctx = webrtc_streamer(
+        key="mic",
+        audio_processor_factory=AudioProcessor,
+        media_stream_constraints={"audio": True, "video": False},
+    )
+
     if st.button("রোগ নির্ণয় করুন"):
-        try:
-            wav = record_audio(10)
-            recog = sr.Recognizer()
-            with sr.AudioFile(wav) as source:
-                audio = recog.record(source)
-            text = recog.recognize_google(audio, language="bn-BD")
+        if ctx.audio_processor and not ctx.audio_processor.frames.empty():
+            frames = []
+            while not ctx.audio_processor.frames.empty():
+                frames.append(ctx.audio_processor.frames.get())
+
+            pcm = b"".join([f.to_ndarray().tobytes() for f in frames])
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+                f.write(pcm)
+                text = transcribe_audio(f.name)
+
             st.markdown(f"### 📝 শনাক্ত টেক্সট:\n{text}")
             disease, remedy = predict_text(text)
             st.markdown(f"### 🦠 রোগ: **{disease}**")
             st.markdown(f"### 💊 প্রতিকার:\n{remedy}")
-        except Exception as e:
-            st.error(f"⚠️ সমস্যা হয়েছে: {e}")
