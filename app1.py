@@ -6,13 +6,15 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModel
 import joblib
 import tempfile
-import subprocess
 import speech_recognition as sr
 import gdown
 import zipfile
 import os
 import queue
 import av
+import numpy as np
+import soundfile as sf
+import ffmpeg
 from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
 
 # ----------------------------
@@ -35,7 +37,7 @@ device = torch.device("cpu")
 MAX_LEN = 128
 
 # ----------------------------
-# Download from Google Drive
+# Download files from Google Drive
 # ----------------------------
 def download_if_not_exists(file_id, out_path):
     if not out_path.exists():
@@ -57,7 +59,7 @@ def prepare_files():
 prepare_files()
 
 # ----------------------------
-# Load model
+# Load model and tokenizer
 # ----------------------------
 @st.cache_resource
 def load_tokenizer_and_model():
@@ -113,7 +115,7 @@ def predict_text(text):
     return disease, remedy
 
 # ----------------------------
-# Audio upload / microphone transcription
+# Audio transcription
 # ----------------------------
 def transcribe_audio(path):
     recog = sr.Recognizer()
@@ -121,22 +123,20 @@ def transcribe_audio(path):
         audio = recog.record(source)
     return recog.recognize_google(audio, language="bn-BD")
 
-# Convert any audio to 16kHz mono WAV
 def convert_to_wav(input_path):
+    """Convert any audio format to 16kHz mono WAV using ffmpeg-python"""
     output_path = input_path.rsplit(".", 1)[0] + "_16k.wav"
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-ac", "1",
-        "-ar", "16000",
-        output_path
-    ]
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (
+        ffmpeg
+        .input(input_path)
+        .output(output_path, ar=16000, ac=1, format='wav')
+        .overwrite_output()
+        .run(quiet=True)
+    )
     return output_path
 
 # ----------------------------
-# Browser microphone (WebRTC)
+# WebRTC microphone
 # ----------------------------
 class AudioProcessor(AudioProcessorBase):
     def __init__(self):
@@ -147,7 +147,7 @@ class AudioProcessor(AudioProcessorBase):
         return frame
 
 # ----------------------------
-# UI
+# Streamlit UI
 # ----------------------------
 st.title("🌾 ফসলের রোগ নির্ণয় সিস্টেম (বাংলা)")
 
@@ -156,7 +156,7 @@ method = st.radio(
     ["✍ টেক্সট", "🎤 অডিও আপলোড", "🎙 মাইক্রোফোন"]
 )
 
-# ---- TEXT ----
+# ---- TEXT INPUT ----
 if method == "✍ টেক্সট":
     text = st.text_area("রোগের লক্ষণ লিখুন:")
     if st.button("রোগ নির্ণয় করুন"):
@@ -182,6 +182,7 @@ elif method == "🎤 অডিও আপলোড":
 # ---- MICROPHONE ----
 elif method == "🎙 মাইক্রোফোন":
     st.info("🎙 ব্রাউজার মাইক্রোফোন ব্যবহার করুন")
+
     ctx = webrtc_streamer(
         key="mic",
         audio_processor_factory=AudioProcessor,
@@ -190,17 +191,13 @@ elif method == "🎙 মাইক্রোফোন":
 
     if st.button("রোগ নির্ণয় করুন"):
         if ctx.audio_processor and not ctx.audio_processor.frames.empty():
-            # combine all frames into a proper WAV
             frames = []
             while not ctx.audio_processor.frames.empty():
                 frames.append(ctx.audio_processor.frames.get())
 
+            # Convert frames to WAV buffer
+            audio_data = np.concatenate([f.to_ndarray() for f in frames], axis=0)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-                # convert frames to WAV using av.AudioFrame
-                import soundfile as sf
-                # stack all frames into numpy array
-                import numpy as np
-                audio_data = np.concatenate([f.to_ndarray() for f in frames], axis=0)
                 sf.write(f.name, audio_data, 16000, format="WAV")
                 wav_path = f.name
 
