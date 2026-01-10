@@ -3,6 +3,7 @@ torch
 transformers
 joblib
 numpy
+scikit-learn
 speechrecognition
 ffmpeg-python
 streamlit-webrtc
