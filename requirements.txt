@@ -2,9 +2,9 @@ streamlit
 torch
 transformers
 joblib
-gdown
-sounddevice
 numpy
-wavio
-SpeechRecognition
+speechrecognition
 ffmpeg-python
+streamlit-webrtc
+av
+gdown
